@@ -1,0 +1,6 @@
+---
+
+- hosts: localhost
+  roles:
+    - docker-env
+    - cluster-nodes

@@ -1,0 +1,31 @@
+---
+# defaults file for docker_dbnodes
+
+master1: "m1"
+master2: "m2"
+master1_port: 3306
+master2_port: 3307
+
+nodes:
+  - { host: "m1", ip: "172.22.0.10", port: 3306 }
+  - { host: "m2", ip: "172.22.0.11", port: 3307 }
+  - { host: "s1", ip: "172.22.0.12", port: 3308 }
+  - { host: "s2", ip: "172.22.0.13", port: 3309 }
+  - { host: "s3", ip: "172.22.0.14", port: 3310 }
+  - { host: "s4", ip: "172.22.0.15", port: 3311 }
+  - { host: "s5", ip: "172.22.0.16", port: 3312 }
+  - { host: "s6", ip: "172.22.0.17", port: 3313 }
+  - { host: "s7", ip: "172.22.0.18", port: 3314 }
+  - { host: "s8", ip: "172.22.0.19", port: 3315 }
+  - { host: "s9", ip: "172.22.0.20", port: 3316 }
+  - { host: "lb", ip: "172.22.0.25", port: 3000 }
+
+db_image: "mariadb:10.4.12"
+root_user: "root"
+root_password: "root"
+
+repl_user: "replica"
+repl_password: "replica"
+
+ansible_to_docker_host: "127.0.0.1"
+

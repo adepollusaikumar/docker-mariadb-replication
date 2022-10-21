@@ -1,0 +1,9 @@
+[mysqld]
+gtid_mode=ON
+enforce-gtid-consistency=ON
+log-slave-updates
+bind-address=0.0.0.0
+server-id=11
+report-host=master
+log-bin=master
+

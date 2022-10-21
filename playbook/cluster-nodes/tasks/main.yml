@@ -1,0 +1,213 @@
+---
+# tasks file for docker_dbnodes
+
+- name: Pull db image from dockerhub.
+  community.docker.docker_image:
+    name: "{{ db_image }}"
+    source: pull
+
+- name: Create and Start dbnode containers
+  community.docker.docker_container:
+    name: "{{ item.host }}"
+    image: "{{ db_image }}"
+    hostname: "{{ item.host }}"
+    ports: 
+      - "{{ item.port }}:3306"
+    networks:
+      - name: "cluster_network"
+        ipv4_address: "{{ item.ip }}"
+    detach: yes
+    interactive: yes
+    tty: yes
+    env:
+      MYSQL_USER: "{{ repl_user }}"
+      MYSQL_PASSWORD: "{{ repl_password }}"
+      MYSQL_ROOT_PASSWORD: "{{ root_password }}"
+  with_items: "{{ nodes }}"
+  when: item.host != 'lb'    
+  
+- name: 15sec  pause to warmup mysql containers
+  pause:
+    seconds: 15
+
+
+- name: 1 - Prepare mysql configuration files
+  shell: docker cp ../cnf/my.cnf  "{{ item.host }}":/etc/my.cnf
+  with_items: "{{ nodes }}"
+  when:  item.host  != 'lb'
+
+- name: 2 - Prepare MySQL configuration files
+  shell: docker exec "{{ item.host }}"  sed -i "s/:host:/{{ item.host }}/g" /etc/my.cnf
+  with_items: "{{ nodes }}"
+  when:  item.host  != 'lb'
+
+- name: 3 - Prepare MySQL configuration files
+  shell: docker exec "{{ item.host }}"  sed  -i  "s/:serverid:/`echo {{ item.ip }}|cut  -d'.' -f4`/g"  /etc/my.cnf
+  with_items: "{{ nodes }}"
+  when:  item.host  != 'lb'
+
+- name: 4 - Prepare MySQL configuration files
+  shell: docker exec "{{ item.host }}"  sed -i "s/read_only=0/read_only=1/g" /etc/my.cnf
+  with_items:  "{{ nodes }}"
+  when:  (item.host  != 'lb') and (item.host  != 'm1') and (item.host  != 'm2')
+
+- name: Set replication filters
+  shell: "{{ item }}"
+  with_items:
+    - docker exec s6  sed  -i -e '$areplicate-wild-do-table=d2.%\nreplicate-wild-do-table=d3.%' /etc/my.cnf
+    - docker exec s7  sed  -i -e '$areplicate-wild-do-table=d1.%\nreplicate-wild-do-table=d3.%' /etc/my.cnf
+    - docker exec s8  sed  -i -e '$areplicate-wild-do-table=d3.%\nreplicate-wild-do-table=d5.%' /etc/my.cnf
+    - docker exec s9  sed  -i -e '$areplicate-wild-do-table=d1.%\nreplicate-wild-do-table=d4.%\nreplicate-wild-do-table=d6.%' /etc/my.cnf
+
+
+
+- name: restart MySQL on all containers
+  shell: 'docker restart "{{ item.host }}"'
+  with_items: "{{ nodes }}"
+  when:  item.host  != 'lb'
+
+- name: Create replica grants
+  shell: mysql -u "{{ root_user }}"  -p"{{ root_password }}"  -h"{{ ansible_to_docker_host }}"  -P"{{ item.port }}" -e"GRANT REPLICATION SLAVE ON *.* TO "{{ repl_user}}"@'%'"
+  with_items: "{{ nodes }}"
+  when:  item.host  != 'lb'
+
+- name: Get m1 host IP
+  command: 'docker exec {{ master1 }}  hostname -i'
+  register: m1_ip
+
+- name: Get m1 port
+  command: 'echo {{ master1_port }}'
+  register: m1_port
+
+
+- name: Get m2 host IP
+  command: 'docker exec {{ master2 }}  hostname -i'
+  register: m2_ip
+
+- name: Get m2 port
+  command: 'echo {{ master2_port }}'
+  register: m2_port
+
+
+- name: m1 - SHOW MASTER STATUS
+  community.mysql.mysql_query:
+    login_user: "{{ root_user }}"
+    login_password: "{{ root_password }}"
+    login_host: "{{ ansible_to_docker_host }}"
+    login_db: mysql
+    login_port: "{{ m1_port.stdout }}"
+    query: SHOW MASTER STATUS
+  register: m1_query
+
+- name: Binlog Co-ordinates for m1
+  set_fact:
+    m1_File: "{{ m1_query.query_result | to_json | from_json | json_query(\"[].File\")  }}"
+    m1_Position: "{{ m1_query.query_result | to_json | from_json | json_query(\"[].Position\")  }}"
+
+- name: m2 - SHOW MASTER STATUS
+  community.mysql.mysql_query:
+    login_user: "{{ root_user }}"
+    login_password: "{{ root_password }}"
+    login_host: "{{ ansible_to_docker_host }}"
+    login_db: mysql
+    login_port: "{{ m2_port.stdout }}"
+    query: SHOW MASTER STATUS
+  register: m2_query
+
+- name: Binlog Co-ordinates for m2
+  set_fact:
+    m2_File: "{{ m2_query.query_result | to_json | from_json | json_query(\"[].File\")  }}"
+    m2_Position: "{{ m2_query.query_result | to_json | from_json | json_query(\"[].Position\")  }}"
+
+
+
+
+- name: Setup DB replication m1 as master
+  community.mysql.mysql_replication:
+    mode: changeprimary
+    login_user: "{{ root_user }}"
+    login_password: "{{ root_password }}"
+    login_port: "{{ item.port }}"
+    login_host: "{{ ansible_to_docker_host }}"
+    primary_host: "{{ m1_ip.stdout }}"
+    primary_user: "{{ repl_user }}"
+    primary_password: "{{ repl_password }}"
+    primary_log_file: "{{ m1_File[0]  }}"
+    primary_log_pos: "{{ m1_Position[0] | int }}"
+  ignore_errors: yes
+  with_items: "{{ nodes }}"
+  when:  (item.host  != 'm1') and (item.host  != 'lb')
+
+
+- name: Setup DB replication m2  co-master
+  community.mysql.mysql_replication:
+    mode: changeprimary
+    login_user: "{{ root_user }}"
+    login_password: "{{ root_password }}"
+    login_port: "{{ item.port }}"
+    login_host: "{{ ansible_to_docker_host }}"
+    primary_host: "{{ m2_ip.stdout }}"
+    primary_user: "{{ repl_user }}"
+    primary_password: "{{ repl_password }}"
+    primary_log_file: "{{ m2_File[0]  }}"
+    primary_log_pos: "{{ m2_Position[0] | int }}"
+  ignore_errors: yes
+  with_items: "{{ nodes }}"
+  when:  item.host  == 'm1'
+
+
+- name: Start Replication
+  community.mysql.mysql_replication:
+    mode: startreplica
+    login_user: "{{ root_user }}"
+    login_password: "{{ root_password }}"
+    login_port: "{{ item.port }}"
+    login_host: "{{ ansible_to_docker_host }}"
+  with_items: "{{ nodes }}"
+  when:  item.host  != 'lb'
+
+
+
+
+
+- name: Start  mysql-orchestrator docker container
+  community.docker.docker_container:
+    name: "{{ item.host }}"
+    image: "sadepollu/mysqlorchproxysql:0.1"
+    hostname: "{{ item.host }}"
+    ports:
+      - "{{ item.port }}:3000"
+    networks:
+      - name: "cluster_network"
+        ipv4_address: "{{ item.ip }}"
+    detach: yes
+    interactive: yes
+    tty: yes
+  with_items: "{{ nodes }}"
+  when:  item.host  == 'lb'
+
+
+
+
+- name: 1 - Prepare Orchestrator  configuration files
+  shell: docker cp ../cnf/orchestrator.conf.json  "{{ item.host }}":/usr/local/orchestrator/orchestrator.conf.json
+  with_items: "{{ nodes }}"
+  when:  item.host  == 'lb'
+
+
+- name: Start mysql-orchestrator
+  shell: 'docker exec "{{ item.host }}" /etc/init.d/orchestrator start '
+  with_items: "{{ nodes }}"
+  when:  item.host  == 'lb'
+
+- name: Prepare Orchestrator
+  shell: docker cp ../scripts/discover.sh   "{{ item.host }}":/tmp/discover.sh 
+  with_items: "{{ nodes }}"
+  when:  item.host  == 'lb'
+
+- name: Discover topology for mysql-orchestrator
+  shell: 'docker exec "{{ item.host }}" sh /tmp/discover.sh '
+  with_items: "{{ nodes }}"
+  when:  item.host  == 'lb'
+
+
